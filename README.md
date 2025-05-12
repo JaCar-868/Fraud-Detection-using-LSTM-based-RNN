@@ -1,71 +1,109 @@
-# Fraud Detection using LSTM
+## Credit Card Fraud Detection using LSTM Classifier
 
-## Overview
+This repository implements a supervised LSTM-based classifier specifically designed to detect credit card fraud from sequential transaction data.
 
-This repository contains an implementation of a Long Short-Term Memory (LSTM) network to detect anomalies in sequential transaction data. The goal is to identify potential fraud by detecting anomalies based on the reconstruction error of the LSTM model.
+## Features
 
-## Table of Contents
+Sequence-based classification: Uses sliding windows of transactions (default length: 30) to capture temporal patterns.
 
-- [Introduction](#introduction)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Code Explanation](#code-explanation)
-- [Contributing](#contributing)
-- [License](#license)
+Bi-directional LSTM architecture: Two stacked bidirectional LSTM layers with dropout regularization and a dense output layer.
 
-## Introduction
+Imbalance handling: Automatically computes class weights to compensate for the rarity of fraud cases.
 
-Fraud detection is a critical application of machine learning where the objective is to identify fraudulent transactions among a large volume of genuine transactions. This project demonstrates how LSTM networks can be used to detect such anomalies by learning the normal transaction patterns and identifying deviations.
+Comprehensive metrics: Reports precision, recall, F1‑score, and ROC AUC on both validation and test sets.
+
+Model persistence: Saves both the best checkpoint and final model, along with the feature scaler, for reproducible inference.
+
+## Requirements
+
+Python 3.7 or higher
+
+TensorFlow 2.x
+
+scikit-learn
+
+pandas
+
+NumPy
+
+joblib
+
+## Install dependencies via:
+
+pip install -r requirements.txt
 
 ## Installation
 
-To run the code in this repository, you'll need to have Python installed along with the following libraries:
-- NumPy
-- Pandas
-- scikit-learn
-- TensorFlow
-
-You can install the required libraries using pip:
-
-pip install numpy pandas scikit-learn tensorflow
+git clone https://github.com/JaCar-868/Fraud-Detection-using-LSTM-based-RNN.git
+cd Fraud-Detection-using-LSTM-based-RNN
 
 ## Usage
-1. Clone the repository:
 
-git clone https://github.com/yourusername/fraud-detection-lstm.git
-cd fraud-detection-lstm
+Run the classifier with:
 
-2. Run the fraud_detection.py program:
+python fraud_detection_improved.py --data PATH_TO_CSV
 
-python fraud_detection.py
+## Arguments:
 
-### Code Explanation
-## Import Libraries
-The necessary libraries are imported, including NumPy for numerical operations, Pandas for data manipulation, scikit-learn for preprocessing, and TensorFlow for building the LSTM model.
+--data : Path to the CSV file containing credit card transactions. The file must include:
 
-## Data Generation
-Sample data is generated for illustration purposes. Normal transaction data is created using a normal distribution, and anomalies are introduced by adding a fixed value to some of the data points.
+Time (or timestamp): Epoch seconds (will be converted internally).
 
-## Data Preprocessing
-The data is scaled using MinMaxScaler to bring all values into the range [0, 1]. The scaled data is then reshaped to be suitable for LSTM input, i.e., [samples, time steps, features].
+Feature columns V1…V28 and Amount.
 
-## Train-Test Split
-The data is split into training and testing sets. 80% of the data is used for training, and 20% is used for testing.
+Class label: 0 = legitimate, 1 = fraud.
 
-## LSTM Model
-An LSTM model is built using TensorFlow's Keras API. The model consists of two LSTM layers followed by a dense layer. The model is compiled with the Adam optimizer and mean squared error (MSE) loss function.
+The script will:
 
-## Model Training
-The model is trained on the training data for 10 epochs with a batch size of 32. Validation is performed on the testing data.
+Load and scale the transaction features.
 
-## Anomaly Detection
-The trained model is used to predict the transaction data. The mean squared error (MSE) between the actual and predicted values is calculated. A threshold is set to identify anomalies, and transactions with an MSE above this threshold are flagged as anomalies.
+Build overlapping sequences of length defined by SEQ_LEN in the script (default 30).
 
-## Output
-The number of detected anomalies is printed to the console.
+Split data chronologically into train (70%), validation (15%), and test (15%) sets.
 
-## Contributing
-Contributions are welcome! If you have any improvements or suggestions, please create a pull request or open an issue to discuss them.
+Train the LSTM classifier with callbacks (EarlyStopping, ModelCheckpoint, ReduceLROnPlateau).
+
+Report validation and test metrics (precision, recall, F1, ROC AUC).
+
+Save the following to models/:
+
+best_credit_card_classifier.h5
+
+final_credit_card_classifier.h5
+
+scaler_credit_card_classifier.save
+
+## Configuration
+
+All hyperparameters live at the top of fraud_detection_improved.py:
+
+SEQ_LEN: Window length for sequences.
+
+BATCH_SIZE: Training batch size.
+
+EPOCHS: Number of epochs to train.
+
+LEARNING_RATE: Initial learning rate.
+
+MODEL_DIR: Directory where models and scalers are saved.
+
+Modify these values as needed before training.
+
+## Deployment and Monitoring
+
+Batch inference: Load the saved model and scaler in a separate script to score new CSVs.
+
+Real-time inference: Integrate into streaming frameworks (e.g., Kafka, AWS Kinesis).
+
+Drift detection: Regularly monitor performance metrics and retrain on fresh data as fraud patterns change.
+
+## License
+
+This project is released under the MIT License.
+
+## Acknowledgments
+
+Based on the [Kaggle Credit Card Fraud Detection dataset on Kaggle](https://www.kaggle.com/mlg-ulb/creditcardfraud).
 
 ## License
 This project is licensed under the MIT License. See the [LICENSE](https://github.com/JaCar-868/Disease-Progression/blob/main/LICENSE) file for more details.
