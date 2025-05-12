@@ -1,12 +1,16 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras import Sequential
-from tensorflow.keras.layers import LSTM, RepeatVector, TimeDistributed, Dense, Dropout, Bidirectional
+from tensorflow.keras import Model
+from tensorflow.keras.layers import Input, LSTM, Bidirectional, Dropout, Dense
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
+from tensorflow.keras.optimizers import Adam
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_score, recall_score, f1_score
+from sklearn.utils import class_weight
+import joblib
 import os
+import argparse
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -19,128 +23,142 @@ BATCH_SIZE = 64
 EPOCHS = 50
 LEARNING_RATE = 1e-3
 MODEL_DIR = "models"
+VERSION = "credit_card_classifier"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 
 def load_data(path):
-    """
-    Load transaction data from CSV. Expect a 'timestamp' and feature columns, and optional 'label'.
-    """
-    df = pd.read_csv(path, parse_dates=['timestamp'])
-    df.sort_values('timestamp', inplace=True)
+    """Load credit card transactions CSV with 'Time', features V1...V28, 'Amount', and 'Class' label."""
+    df = pd.read_csv(path)
+    # Rename columns for consistency
+    if 'Time' in df.columns:
+        df.rename(columns={'Time': 'timestamp'}, inplace=True)
     return df
 
 
-def create_sequences(data, seq_len=SEQ_LEN):
-    """
-    Create overlapping sequences from data array.
-    Returns array of shape (n_samples, seq_len, n_features).
-    """
-    sequences = []
-    for i in range(len(data) - seq_len + 1):
-        sequences.append(data[i:i + seq_len])
-    return np.array(sequences)
+def preprocess(df):
+    """Scale numeric features and encode categorical if present."""
+    df = df.copy()
+    # Ensure timestamp type if exists
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', origin='unix', errors='ignore')
+
+    # Identify label and features
+    if 'Class' not in df.columns:
+        raise ValueError("Data must contain 'Class' column for fraud label.")
+
+    labels = df['Class'].values
+    features = df.drop(columns=['Class', 'timestamp'], errors='ignore')
+
+    # Scale numeric features
+    scaler = MinMaxScaler()
+    features_scaled = scaler.fit_transform(features)
+
+    return features_scaled, labels, scaler
 
 
-def build_lstm_autoencoder(n_features, seq_len=SEQ_LEN):
+def create_sequences(X, y, seq_len=SEQ_LEN):
     """
-    Build an LSTM autoencoder for sequence reconstruction.
+    Build sequences of shape (n_samples, seq_len, n_features) and corresponding labels (label at last step).
     """
-    model = Sequential([
-        Bidirectional(LSTM(64, activation='relu', return_sequences=True), input_shape=(seq_len, n_features)),
-        Dropout(0.2),
-        Bidirectional(LSTM(32, activation='relu', return_sequences=False)),
-        RepeatVector(seq_len),
-        Bidirectional(LSTM(32, activation='relu', return_sequences=True)),
-        Dropout(0.2),
-        Bidirectional(LSTM(64, activation='relu', return_sequences=True)),
-        TimeDistributed(Dense(n_features))
-    ])
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE), loss='mse')
+    seq_X, seq_y = [], []
+    for i in range(len(X) - seq_len + 1):
+        seq_X.append(X[i:i + seq_len])
+        seq_y.append(y[i + seq_len - 1])
+    return np.array(seq_X), np.array(seq_y)
+
+
+def build_classification_model(n_features, seq_len=SEQ_LEN):
+    """LSTM-based classifier for credit card fraud."""
+    inp = Input(shape=(seq_len, n_features))
+    x = Bidirectional(LSTM(64, return_sequences=True))(inp)
+    x = Dropout(0.2)(x)
+    x = Bidirectional(LSTM(32))(x)
+    x = Dropout(0.2)(x)
+    x = Dense(16, activation='relu')(x)
+    out = Dense(1, activation='sigmoid')(x)
+    model = Model(inputs=inp, outputs=out)
+    optimizer = Adam(learning_rate=LEARNING_RATE)
+    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
     return model
 
 
-def train_model(model, x_train, x_val):
-    """
-    Train with callbacks: EarlyStopping, ModelCheckpoint, ReduceLROnPlateau.
-    """
-    checkpoint_path = os.path.join(MODEL_DIR, 'best_autoencoder.h5')
+def train_and_evaluate(model, X_train, y_train, X_val, y_val):
+    """Train model with class weights and callbacks, then evaluate on validation set."""
+    # Compute class weights to address imbalance
+    weights = class_weight.compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
+    class_weights = dict(enumerate(weights))
+
+    # Callbacks
+    ckpt_path = os.path.join(MODEL_DIR, f"best_{VERSION}.h5")
     callbacks = [
         EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-        ModelCheckpoint(checkpoint_path, monitor='val_loss', save_best_only=True),
+        ModelCheckpoint(ckpt_path, monitor='val_loss', save_best_only=True),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
     ]
-    history = model.fit(
-        x_train, x_train,
+
+    model.fit(
+        X_train, y_train,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
-        validation_data=(x_val, x_val),
+        validation_data=(X_val, y_val),
+        class_weight=class_weights,
         callbacks=callbacks,
-        shuffle=True
+        shuffle=False  # for temporal data
     )
-    return history
 
+    # Validation metrics
+    y_pred_prob = model.predict(X_val).ravel()
+    y_pred = (y_pred_prob >= 0.5).astype(int)
+    precision = precision_score(y_val, y_pred)
+    recall = recall_score(y_val, y_pred)
+    f1 = f1_score(y_val, y_pred)
+    roc_auc = roc_auc_score(y_val, y_pred_prob)
+    print(f"Validation Precision: {precision:.4f}")
+    print(f"Validation Recall:    {recall:.4f}")
+    print(f"Validation F1-score:  {f1:.4f}")
+    print(f"Validation ROC AUC:    {roc_auc:.4f}")
 
-def detect_anomalies(model, x_data, threshold):
-    """
-    Compute reconstruction errors and flag anomalies above threshold.
-    Returns boolean mask and errors.
-    """
-    reconstructions = model.predict(x_data)
-    mse = np.mean(np.power(x_data - reconstructions, 2), axis=(1, 2))
-    anomalies = mse > threshold
-    return anomalies, mse
+    return model
 
 
 def main(data_path):
-    # Load and preprocess
+    # Load and preprocess data
     df = load_data(data_path)
-    features = df.drop(columns=['timestamp', 'label'], errors='ignore').values
-    scaler = MinMaxScaler()
-
-    # Split train/val/test by time (70/15/15)
-    n = len(features)
-    train_end = int(0.7 * n)
-    val_end = int(0.85 * n)
-
-    train_data = scaler.fit_transform(features[:train_end])
-    val_data = scaler.transform(features[train_end:val_end])
-    test_data = scaler.transform(features[val_end:])
+    X, y, scaler = preprocess(df)
 
     # Create sequences
-    x_train = create_sequences(train_data)
-    x_val = create_sequences(val_data)
-    x_test = create_sequences(test_data)
+    X_seq, y_seq = create_sequences(X, y)
 
-    # Build and train model
-    n_features = x_train.shape[2]
-    autoencoder = build_lstm_autoencoder(n_features)
-    train_model(autoencoder, x_train, x_val)
+    # Split by time: first 70% train, next 15% val, last 15% test
+    n = len(X_seq)
+    train_end = int(0.7 * n)
+    val_end = int(0.85 * n)
+    X_train, y_train = X_seq[:train_end], y_seq[:train_end]
+    X_val, y_val     = X_seq[train_end:val_end], y_seq[train_end:val_end]
+    X_test, y_test   = X_seq[val_end:], y_seq[val_end:]
 
-    # Determine threshold on validation set (e.g., 99th percentile)
-    _, val_mse = detect_anomalies(autoencoder, x_val, threshold=float('inf'))
-    threshold = np.percentile(val_mse, 99)
-    print(f"Anomaly detection threshold: {threshold:.6f}")
+    # Build and train classifier
+    n_features = X_train.shape[2]
+    model = build_classification_model(n_features)
+    model = train_and_evaluate(model, X_train, y_train, X_val, y_val)
 
-    # Detect on test set
-    anomalies, test_mse = detect_anomalies(autoencoder, x_test, threshold)
+    # Evaluate on test set
+    print("\n--- Test Set Performance ---")
+    y_test_prob = model.predict(X_test).ravel()
+    y_test_pred = (y_test_prob >= 0.5).astype(int)
+    print(f"Test Precision: {precision_score(y_test, y_test_pred):.4f}")
+    print(f"Test Recall:    {recall_score(y_test, y_test_pred):.4f}")
+    print(f"Test F1-score:  {f1_score(y_test, y_test_pred):.4f}")
+    print(f"Test ROC AUC:    {roc_auc_score(y_test, y_test_prob):.4f}")
 
-    # If labels present, evaluate
-    if 'label' in df.columns:
-        labels = df['label'].values[val_end + SEQ_LEN - 1:]
-        precision, recall, f1, _ = precision_recall_fscore_support(labels, anomalies, average='binary')
-        roc_auc = roc_auc_score(labels, test_mse)
-        print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, ROC AUC: {roc_auc:.4f}")
-
-    # Save final model and scaler
-    autoencoder.save(os.path.join(MODEL_DIR, 'final_autoencoder.h5'))
-    import joblib
-    joblib.dump(scaler, os.path.join(MODEL_DIR, 'scaler.save'))
+    # Save model and scaler
+    model.save(os.path.join(MODEL_DIR, f"final_{VERSION}.h5"))
+    joblib.dump(scaler, os.path.join(MODEL_DIR, f"scaler_{VERSION}.save"))
 
 
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description='LSTM Autoencoder for Fraud Detection')
-    parser.add_argument('--data', type=str, required=True, help='Path to transactions CSV')
+    parser = argparse.ArgumentParser(description='LSTM Classifier for Credit Card Fraud Detection')
+    parser.add_argument('--data', type=str, required=True, help='Path to credit card transactions CSV')
     args = parser.parse_args()
     main(args.data)
